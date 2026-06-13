@@ -88,16 +88,64 @@ def derive_key(password: str, salt: bytes) -> bytes:
     return kdf.derive(password.encode("utf-8"))
 
 
+# Chunk size for large-file encryption: 256 MB per chunk.
+# AES-GCM max per call = 2^31-1 bytes (~2 GB).
+# We stay well below that and keep memory usage bounded.
+CHUNK_SIZE = 256 * 1024 * 1024   # 256 MB
+
 def encrypt_data(data: bytes, key: bytes) -> bytes:
-    nonce = secrets.token_bytes(12)
+    """
+    Encrypt bytes using AES-256-GCM with automatic chunking for large files.
+    Files <= CHUNK_SIZE: single-chunk (backward compatible, nonce+ciphertext).
+    Files >  CHUNK_SIZE: multi-chunk format:
+        [magic 4B "SVMC"][chunk_count 4B LE]
+        for each chunk: [nonce 12B][ct_len 4B LE][ciphertext+tag]
+    """
     aesgcm = AESGCM(key)
-    ct = aesgcm.encrypt(nonce, data, None)
-    return nonce + ct
+
+    if len(data) <= CHUNK_SIZE:
+        # Single chunk — same format as before (fully backward compatible)
+        nonce = secrets.token_bytes(12)
+        ct    = aesgcm.encrypt(nonce, data, None)
+        return nonce + ct
+
+    # Multi-chunk for large files
+    chunks = []
+    offset = 0
+    while offset < len(data):
+        chunk = data[offset : offset + CHUNK_SIZE]
+        nonce = secrets.token_bytes(12)
+        ct    = aesgcm.encrypt(nonce, chunk, None)
+        # Store: nonce(12) + ct_len(4) + ct
+        ct_len = len(ct).to_bytes(4, "little")
+        chunks.append(nonce + ct_len + ct)
+        offset += CHUNK_SIZE
+
+    header = b"SVMC" + len(chunks).to_bytes(4, "little")
+    return header + b"".join(chunks)
 
 
 def decrypt_data(blob: bytes, key: bytes) -> bytes:
-    nonce, ct = blob[:12], blob[12:]
+    """
+    Decrypt bytes encrypted by encrypt_data().
+    Auto-detects single-chunk vs multi-chunk format.
+    """
     aesgcm = AESGCM(key)
+
+    if blob[:4] == b"SVMC":
+        # Multi-chunk format
+        chunk_count = int.from_bytes(blob[4:8], "little")
+        parts       = []
+        pos         = 8
+        for _ in range(chunk_count):
+            nonce  = blob[pos : pos + 12];  pos += 12
+            ct_len = int.from_bytes(blob[pos : pos + 4], "little"); pos += 4
+            ct     = blob[pos : pos + ct_len]; pos += ct_len
+            parts.append(aesgcm.decrypt(nonce, ct, None))
+        return b"".join(parts)
+
+    # Single-chunk (original format — backward compatible)
+    nonce, ct = blob[:12], blob[12:]
     return aesgcm.decrypt(nonce, ct, None)
 
 
@@ -117,7 +165,8 @@ PW_RULE_TOTAL   = 4   # 1+1+1+1
 
 def validate_password(password: str):
     """
-    Validates password: exactly 1 lowercase + 1 uppercase + 1 special + 1 digit.
+    Validates password: exactly 1 lowercase + 1 uppercase + 1 special + 1 digit
+    = total exactly 4 characters.
     Returns (is_valid, message, color)
     """
     lower   = sum(1 for c in password if c.islower())
@@ -126,30 +175,47 @@ def validate_password(password: str):
     special = sum(1 for c in password if not c.isalnum())
     total   = len(password)
 
-    if (lower == PW_RULE_LOWER and upper == PW_RULE_UPPER and
-            digits == PW_RULE_DIGITS and special == PW_RULE_SPECIAL):
+    # Fully valid: each type exactly 1, total exactly 4
+    if (lower >= PW_RULE_LOWER and upper >= PW_RULE_UPPER and
+            digits >= PW_RULE_DIGITS and special >= PW_RULE_SPECIAL and
+            total == PW_RULE_TOTAL):
         return True, "Password format is valid!", "#059669"
 
+    all_types_met = (lower >= PW_RULE_LOWER and upper >= PW_RULE_UPPER and
+                     digits >= PW_RULE_DIGITS and special >= PW_RULE_SPECIAL)
+
+    if total > PW_RULE_TOTAL and all_types_met:
+        # All char types satisfied — only complain about length
+        extra = total - PW_RULE_TOTAL
+        return False, f"Too long — remove {extra} character{'s' if extra > 1 else ''}", "#ef4444"
+
+    # Some types still missing
     parts = []
-    if lower   < PW_RULE_LOWER:   parts.append(f"{PW_RULE_LOWER - lower} more a-z")
-    if upper   < PW_RULE_UPPER:   parts.append(f"{PW_RULE_UPPER - upper} more A-Z")
-    if special < PW_RULE_SPECIAL: parts.append(f"{PW_RULE_SPECIAL - special} more !@#")
-    if digits  < PW_RULE_DIGITS:  parts.append(f"{PW_RULE_DIGITS - digits} more 0-9")
-    if total   > PW_RULE_TOTAL:   parts.append(f"{total - PW_RULE_TOTAL} chars too long")
-    return False, "Needs: " + ",  ".join(parts), "#d97706"
+    if lower   < PW_RULE_LOWER:   parts.append(f"{PW_RULE_LOWER - lower} a-z")
+    if upper   < PW_RULE_UPPER:   parts.append(f"{PW_RULE_UPPER - upper} A-Z")
+    if special < PW_RULE_SPECIAL: parts.append(f"{PW_RULE_SPECIAL - special} !@#")
+    if digits  < PW_RULE_DIGITS:  parts.append(f"{PW_RULE_DIGITS - digits} 0-9")
+    msg = "Add: " + ",  ".join(parts)
+    if total > PW_RULE_TOTAL:
+        extra = total - PW_RULE_TOTAL
+        msg += f"  —  remove {extra} extra char{'s' if extra > 1 else ''}"
+    return False, msg, "#d97706"
 
 
 def get_format_status(password: str):
-    """Live counter display: dynamically calculated from rules"""
+    """Live counter display — shows actual counts so user sees exact state."""
     lower   = sum(1 for c in password if c.islower())
     upper   = sum(1 for c in password if c.isupper())
     digits  = sum(1 for c in password if c.isdigit())
     special = sum(1 for c in password if not c.isalnum())
-    ok = (lower >= PW_RULE_LOWER and upper >= PW_RULE_UPPER and
-          special >= PW_RULE_SPECIAL and digits >= PW_RULE_DIGITS and len(password) == PW_RULE_TOTAL)
-    status = (f"a-z: {min(lower, PW_RULE_LOWER)}/{PW_RULE_LOWER}   A-Z: {min(upper, PW_RULE_UPPER)}/{PW_RULE_UPPER}   "
-              f"!@#: {min(special, PW_RULE_SPECIAL)}/{PW_RULE_SPECIAL}   0-9: {min(digits, PW_RULE_DIGITS)}/{PW_RULE_DIGITS}")
-    return status, "#059669" if ok else "#d97706"
+    total   = len(password)
+    all_ok  = (lower == PW_RULE_LOWER and upper == PW_RULE_UPPER and
+               digits == PW_RULE_DIGITS and special == PW_RULE_SPECIAL and
+               total == PW_RULE_TOTAL)
+    status = (f"a-z: {lower}/{PW_RULE_LOWER}   A-Z: {upper}/{PW_RULE_UPPER}   "
+              f"!@#: {special}/{PW_RULE_SPECIAL}   0-9: {digits}/{PW_RULE_DIGITS}   "
+              f"total: {total}/{PW_RULE_TOTAL}")
+    return status, "#059669" if all_ok else "#d97706"
 
 
 
@@ -1364,7 +1430,7 @@ class LockDialog:
 
         # Floating info panels on sides
         _draw_info_panel(self.canvas, dx - 225, 150 + dy, 210, 58, "🔒", "AES-256-GCM", "Military Grade Encryption", tags="card_group")
-        _draw_info_panel(self.canvas, dx - 225, 370 + dy, 210, 58, "🔑", "PBKDF2", "600,000 Iterations", tags="card_group")
+        _draw_info_panel(self.canvas, dx - 225, 370 + dy, 210, 58, "🔑", "PBKDF2", "100,000 Iterations", tags="card_group")
         _draw_info_panel(self.canvas, dx + 455, 150 + dy, 210, 58, "🛡", "YOUR DATA STAYS YOURS", "Zero Knowledge Architecture", tags="card_group")
         _draw_info_panel(self.canvas, dx + 455, 370 + dy, 210, 58, "👁", "DATA INTEGRITY", "Tamper Proof Protection", tags="card_group")
 
@@ -1372,7 +1438,7 @@ class LockDialog:
         cx = win_w // 2
         by = win_h - 60
         _draw_bottom_badge(self.canvas, cx - 422, by, 200, 34, "🛡", "AES-256-GCM Encryption", tags="card_group")
-        _draw_bottom_badge(self.canvas, cx - 207, by, 200, 34, "🔑", "PBKDF2 600,000 Iterations", tags="card_group")
+        _draw_bottom_badge(self.canvas, cx - 207, by, 200, 34, "🔑", "PBKDF2 100,000 Iterations", tags="card_group")
         _draw_bottom_badge(self.canvas, cx + 8, by, 200, 34, "🔒", "DATA INTEGRITY Verified", tags="card_group")
         _draw_bottom_badge(self.canvas, cx + 223, by, 200, 34, "👁", "TAMPER PROOF Protection", tags="card_group")
 
