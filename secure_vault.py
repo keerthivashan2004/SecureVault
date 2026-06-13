@@ -1839,7 +1839,7 @@ class UnlockDialog:
 
         # Floating side info panels
         _draw_info_panel(self.canvas, dx - 225, 130 + dy, 210, 58, "🔒", "AES-256-GCM", "Military Grade Encryption", tags="card_group")
-        _draw_info_panel(self.canvas, dx - 225, 310 + dy, 210, 58, "🔑", "PBKDF2", "600,000 Iterations", tags="card_group")
+        _draw_info_panel(self.canvas, dx - 225, 310 + dy, 210, 58, "🔑", "PBKDF2", "100,000 Iterations", tags="card_group")
         _draw_info_panel(self.canvas, dx + 455, 130 + dy, 210, 58, "🛡", "YOUR DATA STAYS YOURS", "Zero Knowledge Architecture", tags="card_group")
         _draw_info_panel(self.canvas, dx + 455, 310 + dy, 210, 58, "👁", "DATA INTEGRITY", "Tamper Proof Protection", tags="card_group")
 
@@ -1847,7 +1847,7 @@ class UnlockDialog:
         cx = win_w // 2
         by = win_h - 60
         _draw_bottom_badge(self.canvas, cx - 422, by, 200, 34, "🛡", "AES-256-GCM Encryption", tags="card_group")
-        _draw_bottom_badge(self.canvas, cx - 207, by, 200, 34, "🔑", "PBKDF2 600,000 Iterations", tags="card_group")
+        _draw_bottom_badge(self.canvas, cx - 207, by, 200, 34, "🔑", "PBKDF2 100,000 Iterations", tags="card_group")
         _draw_bottom_badge(self.canvas, cx + 8, by, 200, 34, "🔒", "DATA INTEGRITY Verified", tags="card_group")
         _draw_bottom_badge(self.canvas, cx + 223, by, 200, 34, "👁", "TAMPER PROOF Protection", tags="card_group")
 
